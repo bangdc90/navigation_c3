@@ -3,11 +3,13 @@
 #include <vector>
 #include <DFRobotDFPlayerMini.h>
 #include <HardwareSerial.h>
+#include <ESP32Servo.h>  // Thư viện điều khiển Servo
+#include <Wire.h>        // Thư viện I2C cho SR-04
 
 // ===== CONFIG =====
 namespace Config {
   // Hiển thị
-  constexpr uint8_t DISPLAY_ROTATION = 1;  // Điều chỉnh rotation cho ST7789 1.3"
+  constexpr uint8_t DISPLAY_ROTATION = 0;  // Điều chỉnh rotation cho ST7789 1.3"
   constexpr uint8_t FRAME_DELAY_MS = 100;
   
   // GPIO và cảm biến
@@ -20,7 +22,20 @@ namespace Config {
   constexpr unsigned long INPUT_CHECK_INTERVAL = 5; // Kiểm tra input thường xuyên hơn
   
   // Audio
-  constexpr uint8_t AUDIO_VOLUME = 25; // Âm lượng (0-30)
+  constexpr uint8_t AUDIO_VOLUME = 28; // Âm lượng (0-30)
+  
+  // Cấu hình cho Servo và SR-04
+  constexpr uint8_t SERVO_PIN = 2;        // Chân điều khiển Servo
+  constexpr uint8_t SERVO_MIN_ANGLE = 30; // Góc quét nhỏ nhất
+  constexpr uint8_t SERVO_MAX_ANGLE = 140; // Góc quét lớn nhất
+  constexpr uint8_t SERVO_STEP = 2;       // Tăng bước góc quét từ 2 lên 5
+  constexpr uint16_t SERVO_DELAY_MS = 40; // Giảm thời gian chờ từ 50ms xuống 10ms
+  
+  // SR-04 qua I2C
+  constexpr uint8_t SR04_I2C_ADDR = 0x57; // Địa chỉ I2C của SR-04 (có thể thay đổi)
+  constexpr uint8_t SDA_PIN = 8;          // Chân SDA cho I2C
+  constexpr uint8_t SCL_PIN = 9;          // Chân SCL cho I2C
+  constexpr uint8_t OBSTACLE_THRESHOLD = 15; // Ngưỡng phát hiện vật cản (cm)
 }
 
 // ===== CÁC KIỂU DỮ LIỆU =====
@@ -48,8 +63,9 @@ typedef struct _VideoInfo {
 // #include "video13.h"
 // #include "video14.h"
 // #include "video15.h"
-#include "video16.h"
-
+// #include "video16.h"
+#include "video17.h"
+#include "video18.h"
 // ===== BUTTON STATE MACHINE =====
 enum class ButtonState {
   IDLE,           // Không có nút nhấn
@@ -342,7 +358,7 @@ public:
   VideoPlayer() {
     // Sử dụng video15
     _videos = {
-      &video16
+      &video17, &video18
     };
     
     // Bắt đầu với video đầu tiên
@@ -356,20 +372,29 @@ public:
   }
   
   void init() {
-    // Khởi tạo với màn hình đen, chưa phát nhạc
+    // Khởi tạo với màn hình đen, sau đó tự động bắt đầu phát video
     DisplayManager::getInstance().getTft()->fillScreen(TFT_BLACK);
-    DisplayManager::getInstance().setBacklight(false); // Tắt đèn nền khi khởi động
-    Serial.println("Player initialized in STOPPED mode. Press button to start playback.");
+    
+    // Tự động bắt đầu phát video ngay khi khởi động, không cần nhấn nút
+    _currentMode = PlayerMode::PLAYING;
+    _currentIndex = 0; // Bắt đầu với video17 (bình thường)
+    _currentFrame = 0;
+    _lastFrameTime = millis();
+    DisplayManager::getInstance().setBacklight(true); // Bật đèn nền
+    playCurrentAudio(); // Phát audio nếu có
+    
+    Serial.println("Player initialized and automatically started playback");
   }
   
   void update() {
     // Đảm bảo luôn cập nhật nhanh đầu vào trước khi làm bất cứ việc gì khác
+    // (Vẫn giữ lại để tránh ảnh hưởng đến các phần khác của code)
     InputManager::getInstance().quickUpdate();
     
-    // Xử lý các sự kiện đầu vào - luôn ưu tiên
-    handleInput();
+    // Không xử lý nút nhấn nữa vì chúng ta luôn phát video
+    // handleInput(); - đã bỏ
     
-    // Chỉ cập nhật frame nếu đang ở chế độ PLAYING
+    // Chỉ cập nhật frame nếu đang ở chế độ PLAYING (luôn đúng sau khi init)
     if (_currentMode == PlayerMode::PLAYING) {
       unsigned long currentTime = millis();
       
@@ -407,10 +432,11 @@ private:
         case PlayerMode::STOPPED:
           // Khi đang dừng, nhấn nút sẽ bắt đầu phát
           _currentMode = PlayerMode::PLAYING;
+          _currentIndex = 0; // Luôn bắt đầu với video17 (bình thường)
           _currentFrame = 0; // Bắt đầu từ frame đầu tiên
           _lastFrameTime = millis(); // Reset thời gian để phát ngay lập tức
           DisplayManager::getInstance().setBacklight(true); // Bật đèn nền
-          playCurrentAudio();
+          playCurrentAudio(); // Phát audio nếu có
           Serial.println("Bắt đầu phát video");
           break;
           
@@ -434,7 +460,15 @@ private:
   
   // Phát audio cho video hiện tại
   void playCurrentAudio() {
-    AudioManager::getInstance().play(getCurrentVideo()->audio_idx);
+    uint8_t audioTrack = getCurrentVideo()->audio_idx;
+    // Chỉ phát audio nếu audio_idx khác 0
+    if (audioTrack != 0) {
+      AudioManager::getInstance().play(audioTrack);
+    } else {
+      // Nếu audio_idx = 0, dừng audio đang phát (nếu có)
+      AudioManager::getInstance().stop();
+      Serial.println("Không có audio để phát (audio_idx = 0)");
+    }
   }
   
   // Lấy video hiện tại
@@ -448,9 +482,201 @@ private:
     DisplayManager::getInstance().setBacklight(false); // Tắt backlight khi màn hình đen
   }
 
+
 public:
   static VideoPlayer& getInstance() {
     static VideoPlayer instance;
+    return instance;
+  }
+  // Phương thức để chuyển sang video khi phát hiện vật cản (video18)
+  void switchToObstacleVideo() {
+    // Chỉ chuyển nếu đang ở chế độ playing và không phải video 18
+    if (_currentMode == PlayerMode::PLAYING && _currentIndex != 1) {
+      _currentIndex = 1; // Video18 ở vị trí thứ 1 trong mảng
+      _currentFrame = 0; // Bắt đầu từ frame đầu tiên
+      playCurrentAudio(); // Phát audio mới (nếu có)
+      Serial.println("Đã chuyển sang video phát hiện vật cản (video18)");
+    }
+  }
+  
+  // Phương thức để chuyển lại video bình thường khi vật cản đã được loại bỏ (video17)
+  void switchToNormalVideo() {
+    // Chỉ chuyển nếu đang ở chế độ playing và không phải video 17
+    if (_currentMode == PlayerMode::PLAYING && _currentIndex != 0) {
+      _currentIndex = 0; // Video17 ở vị trí thứ 0 trong mảng
+      _currentFrame = 0; // Bắt đầu từ frame đầu tiên
+      playCurrentAudio(); // Phát audio mới (nếu có)
+      Serial.println("Đã chuyển lại video bình thường (video17)");
+    }
+  }
+};
+
+// ===== ULTRASONIC SENSOR MANAGER =====
+class UltrasonicManager {
+private:
+  bool _initialized = false;
+  uint8_t _i2cAddress = Config::SR04_I2C_ADDR;
+  unsigned long _lastTriggerTime = 0;
+  uint32_t _lastDistance = 0; // Thay đổi từ uint16_t sang uint32_t để chứa đủ 3 byte
+  bool _measurementInProgress = false;
+  
+public:
+  UltrasonicManager() {}
+  
+  void init() {
+    // Khởi tạo I2C
+    Wire.begin(Config::SDA_PIN, Config::SCL_PIN);
+    _initialized = true;
+    Serial.println("Ultrasonic I2C SR-04 initialized");
+  }
+  
+  void update() {
+    if (!_initialized) {
+      return;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    // Bắt đầu đo mới nếu chưa đo hoặc sau 50ms
+    if (!_measurementInProgress && (currentTime - _lastTriggerTime >= 50)) {
+      // Trigger đo khoảng cách
+      Wire.beginTransmission(_i2cAddress);
+      Wire.write(0x01); // Command để bắt đầu đo khoảng cách
+      Wire.endTransmission(true); // true để hoàn thành kết nối I2C
+      
+      _lastTriggerTime = currentTime;
+      _measurementInProgress = true;
+    }
+    // Đọc kết quả nếu đã đủ thời gian (ít nhất 60ms sau khi trigger)
+    else if (_measurementInProgress && (currentTime - _lastTriggerTime >= 150)) {
+      Wire.requestFrom(_i2cAddress, (uint8_t)3); // Yêu cầu 3 byte
+      while (Wire.available()) {
+        uint32_t highByte = Wire.read();
+        uint32_t midByte = Wire.read();
+        uint32_t lowByte = Wire.read();
+        // Tính toán khoảng cách từ 3 byte
+        _lastDistance = (highByte << 16) | (midByte << 8) | lowByte;
+      }
+      
+      _measurementInProgress = false;
+    }
+  }
+  
+  uint32_t getDistance() {
+    return _lastDistance/10000; // Trả về kết quả đo mới nhất (cm)
+  }
+  
+  static UltrasonicManager& getInstance() {
+    static UltrasonicManager instance;
+    return instance;
+  }
+};
+
+// ===== SERVO SCANNER MANAGER =====
+class ServoManager {
+private:
+  Servo _servo;
+  int _currentAngle = Config::SERVO_MIN_ANGLE;
+  int _direction = 1; // 1: tăng góc, -1: giảm góc
+  unsigned long _lastMoveTime = 0;
+  bool _scanning = false;
+  bool _obstacleDetected = false;
+  
+public:
+  ServoManager() {}
+  
+  void init() {
+    _servo.attach(Config::SERVO_PIN);
+    _servo.write(Config::SERVO_MIN_ANGLE);
+    _currentAngle = Config::SERVO_MIN_ANGLE;
+    _lastMoveTime = millis();
+    _scanning = true;
+    Serial.println("Servo scanner initialized");
+  }
+  
+  void update() {
+    if (!_scanning) {
+      // Khi không quét, vẫn tiếp tục kiểm tra nếu vật cản đã được loại bỏ
+      if (_obstacleDetected) {
+        uint32_t distance = UltrasonicManager::getInstance().getDistance();
+        
+        // Nếu vật cản đã được loại bỏ, tiếp tục quét từ vị trí hiện tại
+        if (distance == 0 || distance > Config::OBSTACLE_THRESHOLD) {
+          _obstacleDetected = false;
+          _scanning = true; // Tiếp tục quét ngay lập tức
+          
+          // Chuyển về video bình thường khi không còn vật cản
+          VideoPlayer::getInstance().switchToNormalVideo();
+        }
+      }
+      return;
+    }
+    
+    unsigned long currentTime = millis();
+    if (currentTime - _lastMoveTime >= Config::SERVO_DELAY_MS) {
+      _lastMoveTime = currentTime;
+      
+      // Di chuyển servo theo bước đã định nghĩa - tốc độ radar
+      _currentAngle += _direction * Config::SERVO_STEP;
+      
+      // Đảo hướng khi đạt giới hạn và tạo hiệu ứng quét radar
+      if (_currentAngle >= Config::SERVO_MAX_ANGLE) {
+        _currentAngle = Config::SERVO_MAX_ANGLE;
+        _direction = -1;
+        // Log để hiển thị đã đến giới hạn và đảo chiều
+        // Serial.println("Đạt góc tối đa, đảo chiều quét");
+      } else if (_currentAngle <= Config::SERVO_MIN_ANGLE) {
+        _currentAngle = Config::SERVO_MIN_ANGLE;
+        _direction = 1;
+        // Log để hiển thị đã đến giới hạn và đảo chiều
+        // Serial.println("Đạt góc tối thiểu, đảo chiều quét");
+      }
+      
+      // Di chuyển servo đến góc mới
+      _servo.write(_currentAngle);
+      
+      // Kiểm tra khoảng cách và phát hiện vật cản
+      uint32_t distance = UltrasonicManager::getInstance().getDistance();
+      
+      // In khoảng cách của radar khi quét qua các góc 30, 60, 90, 120, 150
+      if (_currentAngle % 30 == 0) {
+        // Serial.printf("RADAR: Góc %d° - Khoảng cách: %d cm\n", _currentAngle, distance);
+      }
+      
+      // Kiểm tra nếu phát hiện vật cản
+      if (distance > 0 && distance <= Config::OBSTACLE_THRESHOLD) {
+        if (!_obstacleDetected) {
+          // Thay vì in log, chuyển sang video phát hiện vật cản (video18)
+          VideoPlayer::getInstance().switchToObstacleVideo();
+          
+          _obstacleDetected = true;
+          _scanning = false; // Dừng quét khi phát hiện vật cản
+        }
+      }
+    }
+  }
+  
+  void startScanning() {
+    _scanning = true;
+    _obstacleDetected = false;
+    Serial.println("Servo scanning started");
+  }
+  
+  void stopScanning() {
+    _scanning = false;
+    Serial.println("Servo scanning stopped");
+  }
+  
+  bool isObstacleDetected() {
+    return _obstacleDetected;
+  }
+  
+  int getCurrentAngle() {
+    return _currentAngle;
+  }
+  
+  static ServoManager& getInstance() {
+    static ServoManager instance;
     return instance;
   }
 };
@@ -471,13 +697,24 @@ void setup() {
   InputManager::getInstance().init();
   VideoPlayer::getInstance().init();
   
+  // Khởi tạo Ultrasonic I2C và Servo
+  UltrasonicManager::getInstance().init();
+  ServoManager::getInstance().init();
+  
   Serial.println("Initialization complete - system ready in STOPPED mode");  
 }
 
 void loop() {
+  // Vẫn giữ lại việc cập nhật đầu vào để các phần khác của code hoạt động bình thường
   InputManager::getInstance().quickUpdate();
-  
   InputManager::getInstance().update();
 
+  // Cập nhật video player (đã bỏ qua xử lý nút nhấn)
   VideoPlayer::getInstance().update();
+  
+  // Cập nhật quá trình đo khoảng cách (không chặn)
+  UltrasonicManager::getInstance().update();
+  
+  // Cập nhật servo và phát hiện vật cản
+  ServoManager::getInstance().update();
 }
