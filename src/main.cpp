@@ -3,8 +3,7 @@
 #include <vector>
 #include <DFRobotDFPlayerMini.h>
 #include <HardwareSerial.h>
-#include <ESP32Servo.h>  // Thư viện điều khiển Servo
-#include <Wire.h>        // Thư viện I2C cho SR-04
+#include <Wire.h>        // Thư viện I2C cho MPU6050
 
 // ===== CONFIG =====
 namespace Config {
@@ -24,18 +23,13 @@ namespace Config {
   // Audio
   constexpr uint8_t AUDIO_VOLUME = 28; // Âm lượng (0-30)
   
-  // Cấu hình cho Servo và SR-04
-  constexpr uint8_t SERVO_PIN = 2;        // Chân điều khiển Servo
-  constexpr uint8_t SERVO_MIN_ANGLE = 30; // Góc quét nhỏ nhất
-  constexpr uint8_t SERVO_MAX_ANGLE = 140; // Góc quét lớn nhất
-  constexpr uint8_t SERVO_STEP = 2;       // Tăng bước góc quét từ 2 lên 5
-  constexpr uint16_t SERVO_DELAY_MS = 40; // Giảm thời gian chờ từ 50ms xuống 10ms
-  
-  // SR-04 qua I2C
-  constexpr uint8_t SR04_I2C_ADDR = 0x57; // Địa chỉ I2C của SR-04 (có thể thay đổi)
+  // Cấu hình cho MPU6050
   constexpr uint8_t SDA_PIN = 8;          // Chân SDA cho I2C
   constexpr uint8_t SCL_PIN = 9;          // Chân SCL cho I2C
-  constexpr uint8_t OBSTACLE_THRESHOLD = 15; // Ngưỡng phát hiện vật cản (cm)
+  constexpr uint8_t MPU6050_I2C_ADDR = 0x68; // Địa chỉ I2C của MPU6050
+  constexpr float SHAKE_THRESHOLD = 1.2;     // Ngưỡng phát hiện shake (g)
+  constexpr unsigned long SHAKE_DETECTION_TIME = 1000; // Thời gian phát hiện shake (ms)
+  constexpr unsigned long SHAKE_COOLDOWN_TIME = 1000;  // Thời gian chờ trước khi có thể phát hiện shake tiếp theo
 }
 
 // ===== CÁC KIỂU DỮ LIỆU =====
@@ -64,8 +58,12 @@ typedef struct _VideoInfo {
 // #include "video14.h"
 // #include "video15.h"
 // #include "video16.h"
-#include "video17.h"
-#include "video18.h"
+// #include "video17.h"
+// #include "video18.h"
+#include "full1.h"
+#include "chongmat1.h"
+#include "xoadau1.h"
+
 // ===== BUTTON STATE MACHINE =====
 enum class ButtonState {
   IDLE,           // Không có nút nhấn
@@ -80,6 +78,159 @@ enum class PlayerMode {
   STOPPED,        // Chế độ dừng (màn hình đen)
   PLAYING,        // Chế độ phát video và audio
   PAUSED          // Chế độ tạm dừng (giữ màn hình hiện tại, không phát âm thanh)
+};
+
+// ===== MPU6050 SHAKE DETECTION MANAGER =====
+class MPU6050Manager {
+private:
+  bool _initialized = false;
+  uint8_t _i2cAddress = Config::MPU6050_I2C_ADDR;
+  unsigned long _lastReadTime = 0;
+  float _accelX = 0, _accelY = 0, _accelZ = 0;
+  bool _shakeDetected = false;
+  unsigned long _shakeStartTime = 0;
+  unsigned long _lastShakeTime = 0; // Thời gian của lần shake cuối cùng
+  
+  // Bộ lọc để tính gia tốc tuyệt đối
+  float _lastMagnitude = 1.0; // Khởi tạo với 1g (trọng lực)
+  int _shakeCount = 0; // Đếm số lần shake trong khoảng thời gian
+  unsigned long _shakeWindowStart = 0; // Thời điểm bắt đầu cửa sổ phát hiện shake
+  
+public:
+  MPU6050Manager() {}
+  
+  void init() {
+    // Khởi tạo I2C
+    Wire.begin(Config::SDA_PIN, Config::SCL_PIN);
+    
+    // Kiểm tra kết nối với MPU6050
+    Wire.beginTransmission(_i2cAddress);
+    uint8_t error = Wire.endTransmission();
+    
+    if (error == 0) {
+      // Đánh thức MPU6050 (thoát khỏi chế độ sleep)
+      writeRegister(0x6B, 0x00);
+      
+      // Cấu hình accelerometer range ±2g
+      writeRegister(0x1C, 0x00);
+      
+      // Cấu hình Low Pass Filter
+      writeRegister(0x1A, 0x03);
+      
+      delay(100);
+      _initialized = true;
+      Serial.println("MPU6050 initialized successfully");
+    } else {
+      Serial.printf("Failed to initialize MPU6050, error: %d\n", error);
+    }
+  }
+  
+  void update() {
+    if (!_initialized) {
+      return;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    // Đọc dữ liệu mỗi 20ms
+    if (currentTime - _lastReadTime >= 20) {
+      _lastReadTime = currentTime;
+      
+      // Đọc dữ liệu accelerometer
+      readAccelData();
+      
+      // Tính độ lớn gia tốc tổng
+      float magnitude = sqrt(_accelX * _accelX + _accelY * _accelY + _accelZ * _accelZ);
+      
+      // Tính sự thay đổi gia tốc (phát hiện shake)
+      float deltaAccel = abs(magnitude - _lastMagnitude);
+      _lastMagnitude = magnitude;
+      
+      // Kiểm tra cooldown period
+      if (currentTime - _lastShakeTime < Config::SHAKE_COOLDOWN_TIME) {
+        return; // Vẫn trong thời gian chờ
+      }
+      
+      // Phát hiện shake nếu thay đổi gia tốc vượt ngưỡng
+      if (deltaAccel > Config::SHAKE_THRESHOLD) {
+        // Nếu chưa có cửa sổ shake nào, bắt đầu cửa sổ mới
+        if (_shakeCount == 0) {
+          _shakeWindowStart = currentTime;
+        }
+        
+        _shakeCount++;
+        Serial.printf("Shake event %d! Delta: %.2f g\n", _shakeCount, deltaAccel);
+        
+        // Kiểm tra nếu có đủ shake trong khoảng thời gian quy định
+        if (_shakeCount >= 3 && (currentTime - _shakeWindowStart) <= Config::SHAKE_DETECTION_TIME) {
+          if (!_shakeDetected) {
+            _shakeDetected = true;
+            _lastShakeTime = currentTime;
+            Serial.printf("STRONG SHAKE DETECTED! %d shakes in %lu ms\n", 
+                         _shakeCount, currentTime - _shakeWindowStart);
+          }
+        }
+      }
+      
+      // Reset cửa sổ shake nếu quá thời gian quy định
+      if (_shakeCount > 0 && (currentTime - _shakeWindowStart) > Config::SHAKE_DETECTION_TIME) {
+        _shakeCount = 0;
+        Serial.println("Shake window reset");
+      }
+    }
+  }
+  
+  bool isShakeDetected() {
+    bool detected = _shakeDetected;
+    if (detected) {
+      _shakeDetected = false; // Reset sau khi đọc
+    }
+    return detected;
+  }
+  
+  void getAcceleration(float &x, float &y, float &z) {
+    x = _accelX;
+    y = _accelY;
+    z = _accelZ;
+  }
+  
+private:
+  void writeRegister(uint8_t reg, uint8_t value) {
+    Wire.beginTransmission(_i2cAddress);
+    Wire.write(reg);
+    Wire.write(value);
+    Wire.endTransmission();
+  }
+  
+  uint8_t readRegister(uint8_t reg) {
+    Wire.beginTransmission(_i2cAddress);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+    Wire.requestFrom(_i2cAddress, (uint8_t)1);
+    return Wire.read();
+  }
+  
+  void readAccelData() {
+    Wire.beginTransmission(_i2cAddress);
+    Wire.write(0x3B); // ACCEL_XOUT_H register
+    Wire.endTransmission(false);
+    Wire.requestFrom(_i2cAddress, (uint8_t)6);
+    
+    int16_t ax = (Wire.read() << 8) | Wire.read();
+    int16_t ay = (Wire.read() << 8) | Wire.read();
+    int16_t az = (Wire.read() << 8) | Wire.read();
+    
+    // Chuyển đổi sang đơn vị g (±2g range)
+    _accelX = ax / 16384.0;
+    _accelY = ay / 16384.0;
+    _accelZ = az / 16384.0;
+  }
+  
+public:
+  static MPU6050Manager& getInstance() {
+    static MPU6050Manager instance;
+    return instance;
+  }
 };
 
 // Cấu hình LovyanGFX cho ESP32-C3 với ST7735 128x160
@@ -353,12 +504,17 @@ private:
   uint16_t _currentFrame = 0;
   PlayerMode _currentMode = PlayerMode::STOPPED; // Bắt đầu ở chế độ dừng
   unsigned long _lastFrameTime = 0;
+  bool _playingSpecialVideo = false; // Flag để theo dõi video đặc biệt
+  uint16_t _savedFrame = 0; // Lưu vị trí frame khi bị ngắt quãng
+  bool _playingButtonHoldVideo = false; // Flag để theo dõi video button hold
   
 public:
   VideoPlayer() {
-    // Sử dụng video15
+    // Sử dụng full1 (video chính), chongmat1 (video shake), và xoadau1 (video button hold)
     _videos = {
-      &video17, &video18
+      &full1,      // Index 0: Video chính
+      &chongmat1,  // Index 1: Video shake
+      &xoadau1     // Index 2: Video button hold
     };
     
     // Bắt đầu với video đầu tiên
@@ -388,13 +544,15 @@ public:
   
   void update() {
     // Đảm bảo luôn cập nhật nhanh đầu vào trước khi làm bất cứ việc gì khác
-    // (Vẫn giữ lại để tránh ảnh hưởng đến các phần khác của code)
     InputManager::getInstance().quickUpdate();
     
-    // Không xử lý nút nhấn nữa vì chúng ta luôn phát video
-    // handleInput(); - đã bỏ
+    // Kiểm tra shake detection từ MPU6050 (ưu tiên cao nhất)
+    handleShakeDetection();
     
-    // Chỉ cập nhật frame nếu đang ở chế độ PLAYING (luôn đúng sau khi init)
+    // Xử lý button input (ưu tiên thấp hơn shake)
+    handleButtonInput();
+    
+    // Chỉ cập nhật frame nếu đang ở chế độ PLAYING
     if (_currentMode == PlayerMode::PLAYING) {
       unsigned long currentTime = millis();
       
@@ -407,10 +565,24 @@ public:
         // Tăng chỉ số frame
         _currentFrame++;
         if (_currentFrame >= getCurrentVideo()->num_frames) {
-          // Loop lại từ đầu khi hết video
-          _currentFrame = 0;
-          // Phát lại audio khi bắt đầu vòng lặp mới
-          playCurrentAudio();
+          // Khi video kết thúc
+          if (_playingSpecialVideo) {
+            // Nếu đang phát video đặc biệt (chongmat1), quay lại video chính
+            _playingSpecialVideo = false;
+            _currentIndex = 0; // Quay lại full1
+            _currentFrame = _savedFrame; // Quay lại vị trí frame đã lưu
+            playCurrentAudio();
+            Serial.printf("Video chongmat1 kết thúc, quay lại video full1 tại frame %d\n", _savedFrame);
+          } else if (_playingButtonHoldVideo) {
+            // Nếu đang phát video button hold (xoadau1), loop lại video này
+            _currentFrame = 0;
+            playCurrentAudio();
+            Serial.println("Video xoadau1 loop lại");
+          } else {
+            // Nếu đang phát video chính, loop lại từ đầu
+            _currentFrame = 0;
+            playCurrentAudio();
+          }
         }
         
         // Cập nhật nhanh input sau khi vẽ frame
@@ -420,6 +592,65 @@ public:
   }
   
 private:
+  // Xử lý phát hiện shake (ưu tiên cao nhất)
+  void handleShakeDetection() {
+    if (MPU6050Manager::getInstance().isShakeDetected()) {
+      // Shake có ưu tiên cao nhất - có thể ngắt cả video button hold
+      if (!_playingSpecialVideo && _currentMode == PlayerMode::PLAYING) {
+        // Lưu vị trí frame hiện tại
+        if (_playingButtonHoldVideo) {
+          // Nếu đang phát video button hold, vẫn lưu frame của video chính
+          // (frame đã được lưu khi bắt đầu button hold)
+          Serial.println("Shake ngắt video button hold");
+        } else {
+          // Nếu đang phát video chính, lưu frame hiện tại
+          _savedFrame = _currentFrame;
+        }
+        
+        // Tắt flag button hold nếu đang bật và chuyển sang shake
+        _playingButtonHoldVideo = false;
+        _playingSpecialVideo = true;
+        _currentIndex = 1; // Chuyển sang chongmat1
+        _currentFrame = 0;
+        playCurrentAudio();
+        Serial.printf("Shake detected! Lưu frame %d, chuyển sang video chongmat1\n", _savedFrame);
+      }
+    }
+  }
+  
+  // Xử lý button input (ưu tiên thấp hơn shake)
+  void handleButtonInput() {
+    auto& inputManager = InputManager::getInstance();
+    ButtonState buttonState = inputManager.getButtonState();
+    
+    // Xử lý button hold (chỉ khi không đang phát video shake)
+    if (buttonState == ButtonState::HELD) {
+      // Chuyển sang video xoadau1 nếu chưa đang phát và không đang phát video shake
+      if (!_playingButtonHoldVideo && !_playingSpecialVideo && _currentMode == PlayerMode::PLAYING) {
+        // Lưu vị trí frame hiện tại của video chính
+        _savedFrame = _currentFrame;
+        
+        _playingButtonHoldVideo = true;
+        _currentIndex = 2; // Chuyển sang xoadau1
+        _currentFrame = 0;
+        playCurrentAudio();
+        Serial.printf("Button hold detected! Lưu frame %d, chuyển sang video xoadau1\n", _savedFrame);
+      }
+    }
+    
+    // Xử lý button release từ hold (chỉ khi không đang phát video shake)
+    if (buttonState == ButtonState::RELEASED_HOLD) {
+      // Quay lại video chính nếu đang phát video button hold và không đang phát video shake
+      if (_playingButtonHoldVideo && !_playingSpecialVideo && _currentMode == PlayerMode::PLAYING) {
+        _playingButtonHoldVideo = false;
+        _currentIndex = 0; // Quay lại full1
+        _currentFrame = _savedFrame; // Quay lại vị trí frame đã lưu
+        playCurrentAudio();
+        Serial.printf("Button released from hold! Quay lại video full1 tại frame %d\n", _savedFrame);
+      }
+    }
+  }
+  
   // Xử lý đầu vào
   void handleInput() {
     auto& inputManager = InputManager::getInstance();
@@ -488,197 +719,6 @@ public:
     static VideoPlayer instance;
     return instance;
   }
-  // Phương thức để chuyển sang video khi phát hiện vật cản (video18)
-  void switchToObstacleVideo() {
-    // Chỉ chuyển nếu đang ở chế độ playing và không phải video 18
-    if (_currentMode == PlayerMode::PLAYING && _currentIndex != 1) {
-      _currentIndex = 1; // Video18 ở vị trí thứ 1 trong mảng
-      _currentFrame = 0; // Bắt đầu từ frame đầu tiên
-      playCurrentAudio(); // Phát audio mới (nếu có)
-      Serial.println("Đã chuyển sang video phát hiện vật cản (video18)");
-    }
-  }
-  
-  // Phương thức để chuyển lại video bình thường khi vật cản đã được loại bỏ (video17)
-  void switchToNormalVideo() {
-    // Chỉ chuyển nếu đang ở chế độ playing và không phải video 17
-    if (_currentMode == PlayerMode::PLAYING && _currentIndex != 0) {
-      _currentIndex = 0; // Video17 ở vị trí thứ 0 trong mảng
-      _currentFrame = 0; // Bắt đầu từ frame đầu tiên
-      playCurrentAudio(); // Phát audio mới (nếu có)
-      Serial.println("Đã chuyển lại video bình thường (video17)");
-    }
-  }
-};
-
-// ===== ULTRASONIC SENSOR MANAGER =====
-class UltrasonicManager {
-private:
-  bool _initialized = false;
-  uint8_t _i2cAddress = Config::SR04_I2C_ADDR;
-  unsigned long _lastTriggerTime = 0;
-  uint32_t _lastDistance = 0; // Thay đổi từ uint16_t sang uint32_t để chứa đủ 3 byte
-  bool _measurementInProgress = false;
-  
-public:
-  UltrasonicManager() {}
-  
-  void init() {
-    // Khởi tạo I2C
-    Wire.begin(Config::SDA_PIN, Config::SCL_PIN);
-    _initialized = true;
-    Serial.println("Ultrasonic I2C SR-04 initialized");
-  }
-  
-  void update() {
-    if (!_initialized) {
-      return;
-    }
-    
-    unsigned long currentTime = millis();
-    
-    // Bắt đầu đo mới nếu chưa đo hoặc sau 50ms
-    if (!_measurementInProgress && (currentTime - _lastTriggerTime >= 50)) {
-      // Trigger đo khoảng cách
-      Wire.beginTransmission(_i2cAddress);
-      Wire.write(0x01); // Command để bắt đầu đo khoảng cách
-      Wire.endTransmission(true); // true để hoàn thành kết nối I2C
-      
-      _lastTriggerTime = currentTime;
-      _measurementInProgress = true;
-    }
-    // Đọc kết quả nếu đã đủ thời gian (ít nhất 60ms sau khi trigger)
-    else if (_measurementInProgress && (currentTime - _lastTriggerTime >= 150)) {
-      Wire.requestFrom(_i2cAddress, (uint8_t)3); // Yêu cầu 3 byte
-      while (Wire.available()) {
-        uint32_t highByte = Wire.read();
-        uint32_t midByte = Wire.read();
-        uint32_t lowByte = Wire.read();
-        // Tính toán khoảng cách từ 3 byte
-        _lastDistance = (highByte << 16) | (midByte << 8) | lowByte;
-      }
-      
-      _measurementInProgress = false;
-    }
-  }
-  
-  uint32_t getDistance() {
-    return _lastDistance/10000; // Trả về kết quả đo mới nhất (cm)
-  }
-  
-  static UltrasonicManager& getInstance() {
-    static UltrasonicManager instance;
-    return instance;
-  }
-};
-
-// ===== SERVO SCANNER MANAGER =====
-class ServoManager {
-private:
-  Servo _servo;
-  int _currentAngle = Config::SERVO_MIN_ANGLE;
-  int _direction = 1; // 1: tăng góc, -1: giảm góc
-  unsigned long _lastMoveTime = 0;
-  bool _scanning = false;
-  bool _obstacleDetected = false;
-  
-public:
-  ServoManager() {}
-  
-  void init() {
-    _servo.attach(Config::SERVO_PIN);
-    _servo.write(Config::SERVO_MIN_ANGLE);
-    _currentAngle = Config::SERVO_MIN_ANGLE;
-    _lastMoveTime = millis();
-    _scanning = true;
-    Serial.println("Servo scanner initialized");
-  }
-  
-  void update() {
-    if (!_scanning) {
-      // Khi không quét, vẫn tiếp tục kiểm tra nếu vật cản đã được loại bỏ
-      if (_obstacleDetected) {
-        uint32_t distance = UltrasonicManager::getInstance().getDistance();
-        
-        // Nếu vật cản đã được loại bỏ, tiếp tục quét từ vị trí hiện tại
-        if (distance == 0 || distance > Config::OBSTACLE_THRESHOLD) {
-          _obstacleDetected = false;
-          _scanning = true; // Tiếp tục quét ngay lập tức
-          
-          // Chuyển về video bình thường khi không còn vật cản
-          VideoPlayer::getInstance().switchToNormalVideo();
-        }
-      }
-      return;
-    }
-    
-    unsigned long currentTime = millis();
-    if (currentTime - _lastMoveTime >= Config::SERVO_DELAY_MS) {
-      _lastMoveTime = currentTime;
-      
-      // Di chuyển servo theo bước đã định nghĩa - tốc độ radar
-      _currentAngle += _direction * Config::SERVO_STEP;
-      
-      // Đảo hướng khi đạt giới hạn và tạo hiệu ứng quét radar
-      if (_currentAngle >= Config::SERVO_MAX_ANGLE) {
-        _currentAngle = Config::SERVO_MAX_ANGLE;
-        _direction = -1;
-        // Log để hiển thị đã đến giới hạn và đảo chiều
-        // Serial.println("Đạt góc tối đa, đảo chiều quét");
-      } else if (_currentAngle <= Config::SERVO_MIN_ANGLE) {
-        _currentAngle = Config::SERVO_MIN_ANGLE;
-        _direction = 1;
-        // Log để hiển thị đã đến giới hạn và đảo chiều
-        // Serial.println("Đạt góc tối thiểu, đảo chiều quét");
-      }
-      
-      // Di chuyển servo đến góc mới
-      _servo.write(_currentAngle);
-      
-      // Kiểm tra khoảng cách và phát hiện vật cản
-      uint32_t distance = UltrasonicManager::getInstance().getDistance();
-      
-      // In khoảng cách của radar khi quét qua các góc 30, 60, 90, 120, 150
-      if (_currentAngle % 30 == 0) {
-        // Serial.printf("RADAR: Góc %d° - Khoảng cách: %d cm\n", _currentAngle, distance);
-      }
-      
-      // Kiểm tra nếu phát hiện vật cản
-      if (distance > 0 && distance <= Config::OBSTACLE_THRESHOLD) {
-        if (!_obstacleDetected) {
-          // Thay vì in log, chuyển sang video phát hiện vật cản (video18)
-          VideoPlayer::getInstance().switchToObstacleVideo();
-          
-          _obstacleDetected = true;
-          _scanning = false; // Dừng quét khi phát hiện vật cản
-        }
-      }
-    }
-  }
-  
-  void startScanning() {
-    _scanning = true;
-    _obstacleDetected = false;
-    Serial.println("Servo scanning started");
-  }
-  
-  void stopScanning() {
-    _scanning = false;
-    Serial.println("Servo scanning stopped");
-  }
-  
-  bool isObstacleDetected() {
-    return _obstacleDetected;
-  }
-  
-  int getCurrentAngle() {
-    return _currentAngle;
-  }
-  
-  static ServoManager& getInstance() {
-    static ServoManager instance;
-    return instance;
-  }
 };
 
 // ===== PROGRAM ENTRY POINTS =====
@@ -697,9 +737,8 @@ void setup() {
   InputManager::getInstance().init();
   VideoPlayer::getInstance().init();
   
-  // Khởi tạo Ultrasonic I2C và Servo
-  UltrasonicManager::getInstance().init();
-  ServoManager::getInstance().init();
+  // Khởi tạo MPU6050 cho phát hiện shake
+  MPU6050Manager::getInstance().init();
   
   Serial.println("Initialization complete - system ready in STOPPED mode");  
 }
@@ -709,12 +748,9 @@ void loop() {
   InputManager::getInstance().quickUpdate();
   InputManager::getInstance().update();
 
-  // Cập nhật video player (đã bỏ qua xử lý nút nhấn)
+  // Cập nhật MPU6050 để phát hiện shake
+  MPU6050Manager::getInstance().update();
+
+  // Cập nhật video player (bao gồm xử lý shake detection)
   VideoPlayer::getInstance().update();
-  
-  // Cập nhật quá trình đo khoảng cách (không chặn)
-  UltrasonicManager::getInstance().update();
-  
-  // Cập nhật servo và phát hiện vật cản
-  ServoManager::getInstance().update();
 }
