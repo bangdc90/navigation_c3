@@ -3,3 +3,35 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Ignore backup and temporary files
+*.bak
+*.new
+*.tmp
+*.temp
+*~
+
+# Files không cần thiết
+src/test_scroll.cpp.bak
+include/bg_image_fix.h
+src/bg_new.c
+build_script.py
+src/font_loader.c
+src/main.cpp.new
+include/fonts/VietnameseCharMap.h
+include/fonts/VietnameseFonts.h
+include/fonts/VietnameseSupport.h
+include/fonts/VietnameseFont.h
+src/ArrowIcons.h
+src/lvgl_font_vietnamese.h
+src/U8g2_for_LovyanGFX.h
+src/GFXFontVietnamese.h
+src/VietnameseFont.h
+src/U8g2_LovyanGFX.h
+src/VietnameseSupport.h
+src/VietnameseFonts.h
+src/NavigationDebugger.h
+src/ChronosManager_old.h
+src/chronos_test.cpp
+src/ChronosESP32Fixed.h
+src/NavSettings.h

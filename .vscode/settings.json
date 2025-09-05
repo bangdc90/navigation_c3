@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "example": "cpp",
+        "local_fonts.h": "c",
+        "lvgl.h": "c"
+    }
+}
