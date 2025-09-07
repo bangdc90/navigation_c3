@@ -272,6 +272,23 @@ public:
 private:
   // Kiểm tra trạng thái điều hướng
   void checkNavigationMode() {
+    // Kiểm tra xem Navigation Manager đã được khởi tạo chưa
+    static bool navManagerInitialized = false;
+    static unsigned long lastCheckTime = 0;
+    
+    // Chỉ kiểm tra mỗi 500ms
+    unsigned long currentTime = millis();
+    if (currentTime - lastCheckTime < 500) {
+      return;
+    }
+    lastCheckTime = currentTime;
+    
+    // Kiểm tra một cách an toàn - sử dụng biến tĩnh từ loop()
+    extern bool navigationInitialized;
+    if (!navigationInitialized) {
+      return; // Nếu chưa khởi tạo, không làm gì cả
+    }
+    
     auto& navManager = NavigationManagerLVGL::getInstance();
     auto& chronosManager = ChronosManager::getInstance();
     
@@ -281,7 +298,7 @@ private:
     
     // In debug mỗi 10 giây để xác nhận trạng thái kết nối
     static unsigned long lastDebugTime = 0;
-    unsigned long currentTime = millis();
+    currentTime = millis();
     if (currentTime - lastDebugTime > 10000) {
       lastDebugTime = currentTime;
       Serial.printf("BLE Connection Status: %s, Navigation Active: %s, Navigation Mode: %d, Player Mode: %d\n", 
@@ -358,6 +375,9 @@ public:
   }
 };
 
+// Biến toàn cục để theo dõi trạng thái khởi tạo Navigation
+bool navigationInitialized = false;
+
 // ===== PROGRAM ENTRY POINTS =====
 void setup() {
   Serial.begin(115200);
@@ -374,12 +394,6 @@ void setup() {
   // Khởi tạo Input Manager
   InputManager::getInstance().init();
   
-  // Khởi tạo Navigation Manager
-  if (Config::NAVIGATION_ENABLED) {
-    NavigationManagerLVGL::getInstance().init(&LVGL_Display::getInstance());
-    BLEStatusOverlay::getInstance().init(LVGL_Display::getInstance().getTft());
-    Serial.println("Navigation Manager initialized");
-  }
   
   // Khởi tạo video player
   VideoPlayer::getInstance().init();
@@ -388,6 +402,26 @@ void setup() {
 }
 
 void loop() {
+  // Khởi tạo Navigation Manager sau 2 giây và chỉ một lần
+  static unsigned long startTime = millis();
+  
+  if (!navigationInitialized && Config::NAVIGATION_ENABLED && (millis() - startTime >= 2000)) {
+    NavigationManagerLVGL::getInstance().init(&LVGL_Display::getInstance());
+    BLEStatusOverlay::getInstance().init(LVGL_Display::getInstance().getTft());
+    Serial.println("Navigation Manager initialized after 2 seconds");
+    
+    // Cập nhật ngay lập tức để tạo UI
+    LVGL_Display::getInstance().update();
+    NavigationManagerLVGL::getInstance().update();
+    BLEStatusOverlay::getInstance().update();
+    
+    // Đảm bảo màn hình được hiển thị
+    LGFX_Device* tft = LVGL_Display::getInstance().getTft();
+    tft->display();
+    
+    navigationInitialized = true;
+  }
+  
   // Cập nhật LVGL
   static unsigned long lastLvglUpdate = 0;
   unsigned long currentTime = millis();
@@ -400,24 +434,26 @@ void loop() {
   InputManager::getInstance().quickUpdate();
   InputManager::getInstance().update();
   
-  // Cập nhật ChronosManager để xử lý kết nối BLE
-  ChronosManager::getInstance().update();
-  
-  // Kiểm tra chế độ hiện tại của VideoPlayer
-  PlayerMode currentMode = VideoPlayer::getInstance().getMode();
-  
-  // Cập nhật NavigationManagerLVGL để xử lý trạng thái kết nối
-  NavigationManagerLVGL::getInstance().update();
-  
-  // Cập nhật thông báo trạng thái BLE
-  BLEStatusOverlay::getInstance().update();
-  
-  // Nếu đang ở chế độ điều hướng, dành nhiều thời gian hơn cho LVGL
-  if (currentMode == PlayerMode::NAVIGATING) {
-    // Đảm bảo LVGL được cập nhật nhiều lần
-    for (int i = 0; i < 3; i++) {
-      LVGL_Display::getInstance().update();
-      delay(5); // Dành thêm thời gian cho LVGL xử lý
+  if(navigationInitialized)
+  {
+    // Cập nhật ChronosManager để xử lý kết nối BLE
+    ChronosManager::getInstance().update();
+    
+    PlayerMode currentMode = VideoPlayer::getInstance().getMode();
+    
+    // Cập nhật NavigationManagerLVGL để xử lý trạng thái kết nối
+    NavigationManagerLVGL::getInstance().update();
+    
+    // Cập nhật thông báo trạng thái BLE
+    BLEStatusOverlay::getInstance().update();
+    
+    // Nếu đang ở chế độ điều hướng, dành nhiều thời gian hơn cho LVGL
+    if (currentMode == PlayerMode::NAVIGATING) {
+      // Đảm bảo LVGL được cập nhật nhiều lần
+      for (int i = 0; i < 3; i++) {
+        LVGL_Display::getInstance().update();
+        delay(5); // Dành thêm thời gian cho LVGL xử lý
+      }
     }
   }
   

@@ -23,9 +23,6 @@ public:
         // Gọi phương thức begin của lớp cha
         ChronosESP32Patched::begin();
         
-        // Bổ sung cấu hình quảng cáo
-        configureBLE();
-        
         return true;
     }
     

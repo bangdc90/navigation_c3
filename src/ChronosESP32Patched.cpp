@@ -113,6 +113,7 @@ void ChronosESP32Patched::begin() {
     
     // Tạo server
     NimBLEServer *pServer = NimBLEDevice::createServer();
+    BLEDevice::setMTU(517);
     pServer->setCallbacks(this);
     
     // Tạo service
@@ -125,8 +126,9 @@ void ChronosESP32Patched::begin() {
     
     pCharacteristicRX = pService->createCharacteristic(
                             CHARACTERISTIC_UUID_RX,
-                            NIMBLE_PROPERTY::WRITE);
+                            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     
+    pCharacteristicTX->setCallbacks(this);
     pCharacteristicRX->setCallbacks(this);
     
     // Bắt đầu service
@@ -135,8 +137,11 @@ void ChronosESP32Patched::begin() {
     // Khởi tạo advertising
     NimBLEAdvertising *pAdvertising = pServer->getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
-    pAdvertising->setAppearance(0x00);
-    pAdvertising->start();
+    pAdvertising->enableScanResponse(true);
+	pAdvertising->setPreferredParams(0x06, 0x12); // functions that help with iPhone connections issue
+	pAdvertising->setName(_watchName.c_str());
+	pAdvertising->start();
+
     
     _inited = true;
     _address = NimBLEDevice::getAddress().toString().c_str();
@@ -208,16 +213,23 @@ void ChronosESP32Patched::onConnect(NimBLEServer *pServer, NimBLEConnInfo &connI
 }
 
 void ChronosESP32Patched::onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) {
-    _connected = false;
-    _subscribed = false;
-    
-    if (connectionChangeCallback != nullptr) {
-        connectionChangeCallback(_connected);
-    }
-    
-    // Bắt đầu quảng bá lại để cho phép kết nối lại
-    NimBLEAdvertising *pAdvertising = pServer->getAdvertising();
-    pAdvertising->start();
+	_connected = false;
+	BLEDevice::startAdvertising();
+	_touch.state = false; // release touch
+
+	if (_navigation.active)
+	{
+		_navigation.active = false;
+		if (configurationReceivedCallback != nullptr)
+		{
+			configurationReceivedCallback(CF_NAV_DATA, _navigation.active ? 1 : 0, 0);
+		}
+	}
+
+	if (connectionChangeCallback != nullptr)
+	{
+		connectionChangeCallback(false);
+	}
     Serial.println("BLE disconnected, restarting advertising");
 }
 
